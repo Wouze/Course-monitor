@@ -1,5 +1,10 @@
 # Section Monitor Bot
 
+# Hosted bot
+You can use the hosted bot at t.me/devkoe_bot
+You will put your password and username at your own risk :) i promise i wont do anything bad, but be safe and host it yourself
+
+# Self hosting
 Multi-user Telegram bot that monitors KSU Edugate course sections and notifies when:
 - 🆕 New sections become available
 - ❌ Sections fill up
