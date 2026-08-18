@@ -1,4 +1,5 @@
 import json
+import logging
 import random
 import re
 import threading
@@ -10,6 +11,22 @@ import telebot
 
 import config
 from edugate import EdugateClient, group_by_course
+
+log = logging.getLogger("bot")
+
+
+def _setup_logging():
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-5s  %(name)-7s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
+_setup_logging()
 
 bot = telebot.TeleBot(config.BOT_TOKEN)
 USERS_FILE = config.USERS_FILE
@@ -102,7 +119,7 @@ def _notify_busy_once():
         try:
             bot.send_message(
                 int(uid),
-                f"⚠️ إيدوجيت مشغول. سأعيد المحاولة بعد {wait} ثانية.",
+                f"⚠️ إيدوجيت لا يستجيب. سأعيد المحاولة بعد {wait} ثانية.",
             )
         except Exception:
             pass
@@ -125,10 +142,14 @@ def check_user_sections(chat_id, notify_errors=True):
     if watches:
         return _check_watches(chat_id, user, watches)
 
-    print(f"Checking catalog for chat {chat_id}...")
+    t0 = time.time()
+    log.info("check catalog  chat=%s", chat_id)
     current, error = _catalog_snapshot()
     if error:
-        print(f"Catalog error for {chat_id}: {error}")
+        if str(error).startswith("busy_backoff:"):
+            log.info("check skip  chat=%s reason=backoff wait=%ss", chat_id, error.split(":", 1)[1])
+        else:
+            log.error("check fail  chat=%s error=%s", chat_id, error)
         if notify_errors and not str(error).startswith("busy_backoff:"):
             try:
                 bot.send_message(
@@ -153,9 +174,15 @@ def check_user_sections(chat_id, notify_errors=True):
         _send_section_group(chat_id, "🆕 *شعب جديدة متاحة!*\n\n", new_sections)
     if removed_sections:
         _send_section_group(chat_id, "❌ *شعب لم تعد متاحة (ممتلئة):*\n\n", removed_sections)
-    if not new_sections and not removed_sections:
-        print(f"Chat {chat_id}: no catalog changes")
 
+    log.info(
+        "check ok  chat=%s sections=%s new=%s gone=%s ms=%s",
+        chat_id,
+        len(current),
+        len(new_sections),
+        len(removed_sections),
+        int((time.time() - t0) * 1000),
+    )
     user["sections"] = current
     save_user(chat_id, user)
     return True
@@ -172,11 +199,12 @@ def _send_section_group(chat_id, header, sections_list):
     try:
         send_long(chat_id, msg)
     except Exception as exc:
-        print(f"Failed to send to {chat_id}: {exc}")
+        log.error("telegram send fail  chat=%s error=%s", chat_id, type(exc).__name__)
 
 
 def _check_watches(chat_id, user, watches):
-    print(f"Checking {len(watches)} watches for chat {chat_id}...")
+    t0 = time.time()
+    log.info("check watches  chat=%s count=%s", chat_id, len(watches))
     opened = []
     closed = []
     ok = True
@@ -189,7 +217,7 @@ def _check_watches(chat_id, user, watches):
             ok = False
             break
         if status == "error":
-            print(f"Watch {section_id}: {result.get('error')}")
+            log.error("watch fail  id=%s error=%s", section_id, result.get("error"))
             ok = False
             continue
 
@@ -216,6 +244,14 @@ def _check_watches(chat_id, user, watches):
         user["total_removed"] = user.get("total_removed", 0) + len(closed)
         _send_section_group(chat_id, "❌ *شعبة في قائمتك لم تعد متاحة:*\n\n", closed)
     save_user(chat_id, user)
+    log.info(
+        "check watches done  chat=%s opened=%s closed=%s ok=%s ms=%s",
+        chat_id,
+        len(opened),
+        len(closed),
+        ok,
+        int((time.time() - t0) * 1000),
+    )
     return ok
 
 
@@ -246,7 +282,7 @@ def scheduler():
                 try:
                     check_user_sections(chat_id, notify_errors=False)
                 except Exception as exc:
-                    print(f"Error checking {chat_id}: {exc}")
+                    log.exception("check crash  chat=%s", chat_id)
                 next_check_at[chat_id] = time.time() + _next_interval(base_interval)
                 time.sleep(1)
             remaining = next_check_at.get(chat_id, now) - time.time()
@@ -268,6 +304,7 @@ def _require_user(message):
 def cmd_start(message):
     chat_id = message.chat.id
     user = get_user(chat_id)
+    log.info("cmd /start  chat=%s  already=%s", chat_id, bool(user))
     if user:
         interval_mins = user.get("check_interval", config.DEFAULT_CHECK_INTERVAL) // 60
         watches = user.get("watches") or {}
@@ -364,6 +401,7 @@ def cmd_check(message):
         bot.reply_to(message, "⏳ انتظر قليلاً قبل الفحص اليدوي.")
         return
     _last_manual_check[chat_id] = now
+    log.info("cmd /check  chat=%s", chat_id)
     bot.reply_to(message, "🔍 جاري الفحص...")
     if check_user_sections(chat_id, notify_errors=True):
         bot.send_message(chat_id, "✅ تم الفحص!")
@@ -399,6 +437,7 @@ def cmd_watch(message):
     if not user:
         return
     ids = [p for p in message.text.split()[1:] if p]
+    log.info("cmd /watch  chat=%s  ids=%s", message.chat.id, len(ids))
     if not ids:
         bot.reply_to(message, "⚠️ أرسل معرف الشعبة\nمثال: `/watch 12345`", parse_mode="Markdown")
         return
@@ -628,12 +667,20 @@ def cmd_broadcast(message):
 if __name__ == "__main__":
     Path(USERS_FILE).parent.mkdir(parents=True, exist_ok=True)
     Path(config.SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
-    print("Section Monitor Bot starting...")
     users = load_users()
     if users:
         save_users(users)
-    print(f"{len(users)} registered chats")
+    session_ok = Path(config.SESSION_FILE).is_file()
+    log.info("starting")
+    log.info(
+        "chats=%s  interval=%sm  jitter=±%ss  min=%sm  session_file=%s",
+        len(users),
+        config.DEFAULT_CHECK_INTERVAL // 60,
+        config.CHECK_JITTER,
+        config.MIN_CHECK_INTERVAL // 60,
+        "yes" if session_ok else "no",
+    )
     thread = threading.Thread(target=scheduler, daemon=True)
     thread.start()
-    print("Bot is running. Ctrl+C to stop.")
+    log.info("telegram polling  (Ctrl+C to stop)")
     bot.infinity_polling()
