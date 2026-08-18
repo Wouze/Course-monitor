@@ -49,10 +49,10 @@ This is a long-running worker (Telegram polling), not an HTTP app. Do not assign
    - `MIN_CHECK_INTERVAL` (minutes, default 15)
    - `CHECK_JITTER` (seconds, default 5)
    - `MAX_WATCHES` (default 15)
-   - `EDUGATE_PROXY` (optional; HTTP/SOCKS proxy if Edugate blocks the VPS IP)
+   - `EDUGATE_PROXY` (optional HTTP/SOCKS proxy)
 4. Deploy. Compose already mounts a volume at `/app/data` so `users.json` survives restarts.
 
-If you use the Dockerfile resource instead of Compose, add a persistent storage mount to `/app/data`. The image defaults `USERS_FILE` to `/app/data/users.json`.
+This compose uses **host networking**. Edugate resets connections from Docker's default bridge (`curl: (56) Connection reset by peer`), even on a home PC. If you deploy as a **Dockerfile** resource instead, set the container network to **host** in Coolify and mount persistent storage at `/app/data`.
 
 Local Docker:
 

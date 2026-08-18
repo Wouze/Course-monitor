@@ -2,6 +2,8 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    # Edugate resets Docker-bridge traffic (curl 56). Host network uses your PC IP.
+    network_mode: host
     environment:
       USERS_FILE: /app/data/users.json
       SESSION_FILE: /app/data/session.json

@@ -3,19 +3,30 @@ import json
 import logging
 import random
 import re
+import socket
 import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+import requests as std_requests
 from bs4 import BeautifulSoup
+from curl_cffi import CurlHttpVersion, CurlOpt
 from curl_cffi import requests as http
 from curl_cffi.requests.exceptions import (
-    ChunkedEncodingError,
+    ChunkedEncodingError as CurlChunkedEncodingError,
     ConnectionError as CurlConnectionError,
-    RequestException,
-    Timeout,
+    RequestException as CurlRequestException,
+    Timeout as CurlTimeout,
 )
+from requests.adapters import HTTPAdapter
+from requests.exceptions import (
+    ChunkedEncodingError as RequestsChunkedEncodingError,
+    ConnectionError as RequestsConnectionError,
+    RequestException as RequestsRequestException,
+    Timeout as RequestsTimeout,
+)
+import urllib3.util.connection as _urllib3_conn
 
 import config
 
@@ -31,12 +42,32 @@ SECTION_SERVLET = "https://edugate.ksu.edu.sa/ksu/ajaxsectionservlet"
 BASE_URL = "https://edugate.ksu.edu.sa"
 HOME_PATH = "/ksu/ui/student/homeIndex.faces"
 IMPERSONATE = "chrome"
+CURL_IPRESOLVE_V4 = 1
 
 BUSY_BACKOFF_START = 60
 BUSY_BACKOFF_CAP = 15 * 60
 REQUEST_TIMEOUT = 45
 RETRY_PAUSE = 2.0
-_NETWORK_ERRORS = (CurlConnectionError, Timeout, ChunkedEncodingError, RequestException)
+_TIMEOUT_ERRORS = (CurlTimeout, RequestsTimeout)
+_NETWORK_ERRORS = (
+    CurlConnectionError,
+    CurlTimeout,
+    CurlChunkedEncodingError,
+    CurlRequestException,
+    RequestsConnectionError,
+    RequestsTimeout,
+    RequestsChunkedEncodingError,
+    RequestsRequestException,
+)
+
+_REQUESTS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+}
 
 
 def _exc_detail(exc):
@@ -61,8 +92,12 @@ def _cookie_dict(session):
     return {cookie.name: cookie.value for cookie in cookies}
 
 
-def _new_session(cookies=None):
+def _make_curl_session(http1=True, ipv4=True, cookies=None):
     kwargs = {"impersonate": IMPERSONATE, "timeout": REQUEST_TIMEOUT}
+    if http1:
+        kwargs["http_version"] = CurlHttpVersion.V1_1
+    if ipv4:
+        kwargs["curl_options"] = {CurlOpt.IPRESOLVE: CURL_IPRESOLVE_V4}
     if config.EDUGATE_PROXY:
         kwargs["proxy"] = config.EDUGATE_PROXY
     session = http.Session(**kwargs)
@@ -70,6 +105,31 @@ def _new_session(cookies=None):
     if cookies:
         session.cookies.update(cookies)
     return session
+
+
+def _make_requests_session(ipv4=True, cookies=None):
+    if ipv4:
+        _urllib3_conn.allowed_gai_family = lambda: socket.AF_INET
+    session = std_requests.Session()
+    session.mount("https://", HTTPAdapter())
+    session.mount("http://", HTTPAdapter())
+    session.headers.update(_REQUESTS_HEADERS)
+    if config.EDUGATE_PROXY:
+        session.proxies.update(
+            {"http": config.EDUGATE_PROXY, "https": config.EDUGATE_PROXY}
+        )
+    if cookies:
+        session.cookies.update(cookies)
+    return session
+
+
+def _log_dns():
+    try:
+        infos = socket.getaddrinfo("edugate.ksu.edu.sa", 443)
+        addrs = sorted({item[4][0] for item in infos})
+        log.info("dns  %s", " ".join(addrs))
+    except OSError as exc:
+        log.warning("dns fail  %s", exc)
 
 _HIDDEN_PREFIXES = (
     "crsName",
@@ -84,26 +144,69 @@ _HIDDEN_PREFIXES = (
 class EdugateClient:
     def __init__(self):
         self._lock = threading.Lock()
-        self._session = _new_session()
+        self._session_factory = lambda cookies: _make_curl_session(
+            http1=True, ipv4=True, cookies=cookies
+        )
+        self._session = self._session_factory({})
         self._courses_url = None
         self._backoff_until = 0.0
         self._backoff_seconds = BUSY_BACKOFF_START
         self._busy_alerted = False
         self._catalog_cache = (0.0, None)
-        log.info(
-            "http  client=curl_cffi  impersonate=%s  proxy=%s",
-            IMPERSONATE,
-            "yes" if config.EDUGATE_PROXY else "no",
-        )
+        log.info("http  proxy=%s", "yes" if config.EDUGATE_PROXY else "no")
+        self._pick_transport()
         self._load_session()
-        self._probe()
 
-    def _probe(self):
+    def _pick_transport(self):
+        strategies = [
+            (
+                "curl chrome http1 ipv4",
+                lambda cookies: _make_curl_session(http1=True, ipv4=True, cookies=cookies),
+            ),
+            (
+                "curl chrome ipv4",
+                lambda cookies: _make_curl_session(http1=False, ipv4=True, cookies=cookies),
+            ),
+            (
+                "curl chrome http1",
+                lambda cookies: _make_curl_session(http1=True, ipv4=False, cookies=cookies),
+            ),
+            ("requests ipv4", lambda cookies: _make_requests_session(ipv4=True, cookies=cookies)),
+        ]
+        for name, factory in strategies:
+            session = factory({})
+            try:
+                resp = session.get(LOGIN_URL, timeout=15)
+                size = len(resp.content or b"")
+                if resp.status_code == 200 and size > 500:
+                    try:
+                        self._session.close()
+                    except Exception:
+                        pass
+                    self._session_factory = factory
+                    self._session = session
+                    log.info(
+                        "probe ok  transport=%s status=%s bytes=%s",
+                        name,
+                        resp.status_code,
+                        size,
+                    )
+                    return
+                log.warning("probe skip  transport=%s status=%s bytes=%s", name, resp.status_code, size)
+            except Exception as exc:
+                log.warning("probe fail  transport=%s %s", name, _exc_detail(exc))
+            try:
+                session.close()
+            except Exception:
+                pass
+        _log_dns()
+        log.warning("probe none worked, using curl chrome http1 ipv4")
+        self._session_factory = strategies[0][1]
         try:
-            resp = self._session.get(LOGIN_URL, timeout=20)
-            log.info("probe ok  status=%s bytes=%s", resp.status_code, len(resp.content or b""))
-        except Exception as exc:
-            log.warning("probe fail  %s", _exc_detail(exc))
+            self._session.close()
+        except Exception:
+            pass
+        self._session = self._session_factory({})
 
     def _rebuild_session(self, keep_cookies=True):
         cookies = _cookie_dict(self._session) if keep_cookies else {}
@@ -111,7 +214,7 @@ class EdugateClient:
             self._session.close()
         except Exception:
             pass
-        self._session = _new_session(cookies)
+        self._session = self._session_factory(cookies)
 
     def _get(self, url, **kwargs):
         kwargs.setdefault("timeout", REQUEST_TIMEOUT)
@@ -253,9 +356,9 @@ class EdugateClient:
                     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
                 },
             )
-        except Timeout:
+        except _TIMEOUT_ERRORS:
             return {"section_id": section_id, "status": "error", "error": "timeout"}
-        except RequestException as exc:
+        except _NETWORK_ERRORS as exc:
             return {"section_id": section_id, "status": "error", "error": type(exc).__name__}
 
         body = (resp.text or "").strip()
@@ -320,8 +423,6 @@ class EdugateClient:
                 return html
         except _NETWORK_ERRORS as exc:
             log.warning("addCourses dropped (%s)", type(exc).__name__)
-        except RequestException:
-            pass
         return None
 
     def _login_and_open_catalog(self):
@@ -370,9 +471,9 @@ class EdugateClient:
                 return None, "Could not find courses page redirect"
             self._courses_url = _stable_courses_url(url)
             return html, None
-        except Timeout:
+        except _TIMEOUT_ERRORS:
             return None, "Connection timeout"
-        except RequestException as exc:
+        except _NETWORK_ERRORS as exc:
             log.warning("login failed  %s", _exc_detail(exc))
             return None, type(exc).__name__
 
