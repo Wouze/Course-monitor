@@ -1,11 +1,7 @@
 # Section Monitor Bot
 
-# Hosted bot
-You can use the hosted bot at https://t.me/devkoe_bot
-You will put your password and username at your own risk :) i promise i wont do anything bad, but be safe and host it yourself
-
 # Self hosting
-Multi-user Telegram bot that monitors KSU Edugate course sections and notifies when:
+Telegram bot that monitors KSU Edugate course sections and notifies when:
 - 🆕 New sections become available
 - ❌ Sections fill up
 
@@ -13,20 +9,29 @@ Multi-user Telegram bot that monitors KSU Edugate course sections and notifies w
 
 ```bash
 pip install -r requirements.txt
-python bot.py
+cp .env.example .env
 ```
 
-Configure `config.py`:
-```python
-BOT_TOKEN = 'your_bot_token'
-ADMIN_ID = 123456789  # Your Telegram chat ID
+Edit `.env`:
+```
+BOT_TOKEN=your_bot_token
+ADMIN_ID=123456789
+EDUGATE_USERNAME=your_student_id
+EDUGATE_PASSWORD=your_edugate_password
+```
+
+Edugate credentials stay in `.env` only. The bot never asks for them in Telegram.
+
+Then start the bot:
+```bash
+python bot.py
 ```
 
 ## User Commands
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Register with Edugate credentials |
+| `/start` | Subscribe this chat to alerts |
 | `/check` | Check for changes now |
 | `/sections` | View available sections |
 | `/stats` | Your statistics |
@@ -46,5 +51,6 @@ ADMIN_ID = 123456789  # Your Telegram chat ID
 ## Files
 
 - `bot.py` - Main bot
-- `config.py` - Bot token & admin ID
-- `users.json` - User data (auto-created)
+- `config.py` - Loads settings from `.env`
+- `.env` - Bot token, admin ID, and Edugate login (not committed)
+- `users.json` - Chat snapshots & stats only (auto-created, not committed)

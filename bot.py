@@ -24,24 +24,27 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# User states for registration flow
-user_states = {}  # {chat_id: {'state': 'waiting_username'/'waiting_password', 'username': '...'}}
-
-
 # --- User Data Management ---
+def _without_secrets(user_data):
+    """Never persist Edugate credentials — they live in .env."""
+    return {k: v for k, v in user_data.items() if k not in ('username', 'password')}
+
+
 def load_users():
     """Load all users from JSON file."""
     try:
         with open(USERS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            users = json.load(f)
     except FileNotFoundError:
         return {}
+    return {uid: _without_secrets(data) for uid, data in users.items()}
 
 
 def save_users(users):
     """Save all users to JSON file."""
+    cleaned = {uid: _without_secrets(data) for uid, data in users.items()}
     with open(USERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+        json.dump(cleaned, f, ensure_ascii=False, indent=2)
 
 
 def get_user(chat_id):
@@ -73,8 +76,8 @@ def is_admin(chat_id):
 
 
 # --- Edugate Functions ---
-def fetch_courses_page(username, password):
-    """Login and fetch the all courses page for a specific user."""
+def fetch_courses_page():
+    """Login with .env credentials and fetch the all courses page."""
     session = requests.Session()
     session.headers.update(HEADERS)
     
@@ -91,8 +94,8 @@ def fetch_courses_page(username, password):
             "loginForm": "loginForm",
             "biConnectionConfig": "true",
             "token": "",
-            "username": username,
-            "password": password,
+            "username": config.EDUGATE_USERNAME,
+            "password": config.EDUGATE_PASSWORD,
             "newsCode": "",
             "javax.faces.ViewState": viewstate["value"],
             "loginUsersLink": "loginUsersLink"
@@ -207,7 +210,7 @@ def check_user_sections(chat_id):
     
     print(f"🔍 Checking sections for user {chat_id}...")
     
-    html, error = fetch_courses_page(user['username'], user['password'])
+    html, error = fetch_courses_page()
     if error:
         print(f"❌ Error for user {chat_id}: {error}")
         try:
@@ -313,20 +316,45 @@ def cmd_start(message):
         interval_mins = user.get('check_interval', config.DEFAULT_CHECK_INTERVAL) // 60
         bot.reply_to(message, 
             f"👋 مرحباً! أنت مسجل بالفعل.\n\n"
-            f"👤 المستخدم: `{user['username']}`\n"
+            f"👤 المستخدم: `{config.EDUGATE_USERNAME}`\n"
             f"📊 الشعب المحفوظة: {len(user.get('sections', {}))}\n"
             f"⏰ الفحص كل: {interval_mins} دقيقة\n\n"
             f"أرسل /help لعرض الأوامر",
             parse_mode="Markdown"
         )
-    else:
-        user_states[chat_id] = {'state': 'waiting_username'}
-        bot.reply_to(message,
-            "👋 مرحباً بك في بوت مراقبة الشعب!\n\n"
-            "سأساعدك في مراقبة الشعب المتاحة وإخبارك عند فتح شعب جديدة.\n\n"
-            "📝 *للتسجيل، أرسل رقمك الجامعي:*",
+        return
+
+    bot.reply_to(message, "🔄 جاري التحقق من حساب إيدوجيت...")
+    html, error = fetch_courses_page()
+    if error:
+        bot.send_message(
+            chat_id,
+            f"❌ *فشل تسجيل الدخول:*\n`{error}`\n\n"
+            f"تحقق من `EDUGATE_USERNAME` و `EDUGATE_PASSWORD` في ملف `.env`.",
             parse_mode="Markdown"
         )
+        return
+
+    sections = parse_sections(html)
+    save_user(chat_id, {
+        'sections': sections,
+        'check_interval': config.DEFAULT_CHECK_INTERVAL,
+        'registered_at': datetime.now().isoformat(),
+        'total_checks': 0,
+        'total_new': 0,
+        'total_removed': 0
+    })
+    bot.send_message(
+        chat_id,
+        f"✅ *تم التسجيل بنجاح!*\n\n"
+        f"👤 المستخدم: `{config.EDUGATE_USERNAME}`\n"
+        f"📊 تم العثور على {len(sections)} شعبة متاحة\n\n"
+        f"سأخبرك تلقائياً عند:\n"
+        f"🆕 فتح شعب جديدة\n"
+        f"❌ امتلاء شعب موجودة\n\n"
+        f"أرسل /help لعرض الأوامر",
+        parse_mode="Markdown"
+    )
 
 
 @bot.message_handler(commands=['help'])
@@ -335,7 +363,7 @@ def cmd_help(message):
     help_text = """📖 *أوامر البوت:*
 
 *الأساسية:*
-/start - بدء التسجيل
+/start - الاشتراك في التنبيهات
 /check - فحص التغييرات الآن
 /sections - عرض الشعب المتاحة
 /stats - إحصائياتك
@@ -389,7 +417,7 @@ def cmd_sections(message):
     
     bot.reply_to(message, "📥 جاري جلب الشعب...")
     
-    html, error = fetch_courses_page(user['username'], user['password'])
+    html, error = fetch_courses_page()
     if error:
         bot.send_message(chat_id, f"❌ *خطأ:* {error}", parse_mode="Markdown")
         return
@@ -434,7 +462,7 @@ def cmd_stats(message):
     
     msg = f"""📈 *إحصائياتك:*
 
-👤 المستخدم: `{user['username']}`
+👤 المستخدم: `{config.EDUGATE_USERNAME}`
 📊 الشعب المتاحة: {len(user.get('sections', {}))}
 
 ⏰ الفحص كل: {interval_mins} دقيقة
@@ -505,8 +533,6 @@ def cmd_logout(message):
     chat_id = message.chat.id
     
     if delete_user(chat_id):
-        if chat_id in user_states:
-            del user_states[chat_id]
         bot.reply_to(message, "✅ تم إلغاء تسجيلك بنجاح. أرسل /start للتسجيل مرة أخرى.")
     else:
         bot.reply_to(message, "⚠️ أنت غير مسجل.")
@@ -547,7 +573,7 @@ def cmd_users(message):
     for uid, data in users.items():
         interval = data.get('check_interval', config.DEFAULT_CHECK_INTERVAL) // 60
         sections = len(data.get('sections', {}))
-        msg += f"• `{uid}` - {data['username']} ({sections} شعبة, كل {interval}د)\n"
+        msg += f"• `{uid}` ({sections} شعبة, كل {interval}د)\n"
     
     bot.send_message(chat_id, msg, parse_mode="Markdown")
 
@@ -575,73 +601,14 @@ def cmd_broadcast(message):
     bot.reply_to(message, f"✅ تم الإرسال إلى {sent}/{len(users)} مستخدم")
 
 
-@bot.message_handler(func=lambda m: m.chat.id in user_states)
-def handle_registration(message):
-    """Handle registration flow messages."""
-    chat_id = message.chat.id
-    state = user_states.get(chat_id, {})
-    text = message.text.strip()
-    
-    if state.get('state') == 'waiting_username':
-        user_states[chat_id] = {'state': 'waiting_password', 'username': text}
-        bot.reply_to(message, 
-            f"✅ الرقم الجامعي: `{text}`\n\n"
-            f"🔑 *الآن أرسل كلمة المرور:*",
-            parse_mode="Markdown"
-        )
-    
-    elif state.get('state') == 'waiting_password':
-        username = state['username']
-        password = text
-        
-        try:
-            bot.delete_message(chat_id, message.message_id)
-        except:
-            pass
-        
-        bot.send_message(chat_id, "🔄 جاري التحقق من بياناتك...")
-        
-        html, error = fetch_courses_page(username, password)
-        
-        if error:
-            del user_states[chat_id]
-            bot.send_message(chat_id, 
-                f"❌ *فشل تسجيل الدخول:*\n`{error}`\n\n"
-                f"أرسل /start للمحاولة مرة أخرى.",
-                parse_mode="Markdown"
-            )
-            return
-        
-        sections = parse_sections(html)
-        save_user(chat_id, {
-            'username': username,
-            'password': password,
-            'sections': sections,
-            'check_interval': config.DEFAULT_CHECK_INTERVAL,
-            'registered_at': datetime.now().isoformat(),
-            'total_checks': 0,
-            'total_new': 0,
-            'total_removed': 0
-        })
-        del user_states[chat_id]
-        
-        bot.send_message(chat_id,
-            f"✅ *تم التسجيل بنجاح!*\n\n"
-            f"👤 المستخدم: `{username}`\n"
-            f"📊 تم العثور على {len(sections)} شعبة متاحة\n\n"
-            f"سأخبرك تلقائياً عند:\n"
-            f"🆕 فتح شعب جديدة\n"
-            f"❌ امتلاء شعب موجودة\n\n"
-            f"أرسل /help لعرض الأوامر",
-            parse_mode="Markdown"
-        )
-
-
 # --- Main ---
 if __name__ == "__main__":
-    print("🤖 Multi-User Section Monitor Bot starting...")
+    print("🤖 Section Monitor Bot starting...")
     users = load_users()
-    print(f"📬 {len(users)} registered users")
+    if users:
+        save_users(users)
+    print(f"📬 {len(users)} registered chats")
+    print(f"👤 Edugate user: {config.EDUGATE_USERNAME}")
     print(f"👑 Admin ID: {config.ADMIN_ID}")
     
     # Start scheduler in background
