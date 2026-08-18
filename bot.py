@@ -125,15 +125,15 @@ def _notify_busy_once():
             pass
 
 
-def _catalog_snapshot():
-    sections, error = edugate.fetch_catalog()
+def _catalog_snapshot(force=False):
+    sections, error = edugate.fetch_catalog(force=force)
     if error and str(error).startswith("busy_backoff:"):
         _notify_busy_once()
         return None, error
     return sections, error
 
 
-def check_user_sections(chat_id, notify_errors=True):
+def check_user_sections(chat_id, notify_errors=True, force=False):
     user = get_user(chat_id)
     if not user:
         return False
@@ -144,7 +144,7 @@ def check_user_sections(chat_id, notify_errors=True):
 
     t0 = time.time()
     log.info("check catalog  chat=%s", chat_id)
-    current, error = _catalog_snapshot()
+    current, error = _catalog_snapshot(force=force)
     if error:
         if str(error).startswith("busy_backoff:"):
             log.info("check skip  chat=%s reason=backoff wait=%ss", chat_id, error.split(":", 1)[1])
@@ -277,7 +277,10 @@ def scheduler():
         for chat_id_str, user_data in users.items():
             chat_id = int(chat_id_str)
             base_interval = user_data.get("check_interval", config.DEFAULT_CHECK_INTERVAL)
-            due = next_check_at.get(chat_id, 0)
+            if chat_id not in next_check_at:
+                next_check_at[chat_id] = now + 8
+                log.info("scheduler  chat=%s first check in 8s", chat_id)
+            due = next_check_at[chat_id]
             if now >= due:
                 try:
                     check_user_sections(chat_id, notify_errors=False)
@@ -403,7 +406,7 @@ def cmd_check(message):
     _last_manual_check[chat_id] = now
     log.info("cmd /check  chat=%s", chat_id)
     bot.reply_to(message, "🔍 جاري الفحص...")
-    if check_user_sections(chat_id, notify_errors=True):
+    if check_user_sections(chat_id, notify_errors=True, force=True):
         bot.send_message(chat_id, "✅ تم الفحص!")
     else:
         bot.send_message(chat_id, "⚠️ لم يكتمل الفحص. حاول لاحقاً.")

@@ -3,6 +3,7 @@ import json
 import logging
 import random
 import re
+import socket
 import threading
 import time
 from pathlib import Path
@@ -10,18 +11,22 @@ from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-
 import config
 
 log = logging.getLogger("edugate")
+
+# Prefer IPv4 — Edugate often RSTs IPv6 from Docker/VPS hosts
+import urllib3.util.connection as _urllib3_conn
+
+_urllib3_conn.allowed_gai_family = lambda: socket.AF_INET
 
 LOGIN_URL = "https://edugate.ksu.edu.sa/ksu/ui/home.faces"
 REGISTRATION_URL = (
     "https://edugate.ksu.edu.sa/ksu/ui/student/registration/index/forwardMainReg.faces"
 )
 ADD_COURSES_URL = "https://edugate.ksu.edu.sa/ksu/addCourses"
+COURSES_PATH = "/ksu/ui/student/registration/index/allCoursesIndex.faces"
 SECTION_SERVLET = "https://edugate.ksu.edu.sa/ksu/ajaxsectionservlet"
 BASE_URL = "https://edugate.ksu.edu.sa"
 HOME_PATH = "/ksu/ui/student/homeIndex.faces"
@@ -30,12 +35,18 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Connection": "close",
 }
 
 BUSY_BACKOFF_START = 60
 BUSY_BACKOFF_CAP = 15 * 60
-REQUEST_TIMEOUT = (15, 30)
+REQUEST_TIMEOUT = (20, 45)
+RETRY_PAUSE = 2.0
 _NETWORK_ERRORS = (
     requests.ConnectionError,
     requests.Timeout,
@@ -43,23 +54,21 @@ _NETWORK_ERRORS = (
 )
 
 
+def _stable_courses_url(url):
+    """Drop one-shot ?reg= so a saved URL can be reused."""
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if not parsed.path:
+        return BASE_URL + COURSES_PATH
+    return f"{BASE_URL}{parsed.path}"
+
+
 def _new_session(cookies=None):
     session = requests.Session()
-    retry = Retry(
-        total=2,
-        connect=2,
-        read=1,
-        backoff_factor=0.6,
-        status_forcelist=(502, 503, 504),
-        allowed_methods=frozenset(["GET", "POST"]),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
+    session.mount("https://", HTTPAdapter())
+    session.mount("http://", HTTPAdapter())
     session.headers.update(HEADERS)
-    # Avoid stale keep-alive sockets that show up as ConnectionError later
-    session.headers["Connection"] = "close"
     if cookies:
         session.cookies.update(cookies)
     return session
@@ -95,21 +104,27 @@ class EdugateClient:
 
     def _get(self, url, **kwargs):
         kwargs.setdefault("timeout", REQUEST_TIMEOUT)
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("Referer", BASE_URL + "/")
         try:
-            return self._session.get(url, **kwargs)
+            return self._session.get(url, headers=headers, **kwargs)
         except _NETWORK_ERRORS as exc:
-            log.warning("retry GET after %s", type(exc).__name__)
+            log.warning("GET %s failed (%s), wait %.0fs then retry", urlparse(url).path, type(exc).__name__, RETRY_PAUSE)
+            time.sleep(RETRY_PAUSE)
             self._rebuild_session(keep_cookies=True)
-            return self._session.get(url, **kwargs)
+            return self._session.get(url, headers=headers, **kwargs)
 
     def _post(self, url, **kwargs):
         kwargs.setdefault("timeout", REQUEST_TIMEOUT)
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("Referer", url)
         try:
-            return self._session.post(url, **kwargs)
+            return self._session.post(url, headers=headers, **kwargs)
         except _NETWORK_ERRORS as exc:
-            log.warning("retry POST after %s", type(exc).__name__)
+            log.warning("POST %s failed (%s), wait %.0fs then retry", urlparse(url).path, type(exc).__name__, RETRY_PAUSE)
+            time.sleep(RETRY_PAUSE)
             self._rebuild_session(keep_cookies=True)
-            return self._session.post(url, **kwargs)
+            return self._session.post(url, headers=headers, **kwargs)
 
     def backoff_remaining(self):
         return max(0, int(self._backoff_until - time.time()))
@@ -128,9 +143,12 @@ class EdugateClient:
                     log.info("catalog ok  source=cache sections=%s", len(cached))
                     return cached, None
 
+            had_cookies = bool(self._session.cookies)
             html = self._catalog_html_reused()
             source = "session" if html else "login"
             if html is None:
+                if had_cookies:
+                    time.sleep(RETRY_PAUSE)
                 html, error = self._login_and_open_catalog()
                 if error:
                     if error in {
@@ -259,22 +277,28 @@ class EdugateClient:
             return True
 
     def _catalog_html_reused(self):
-        if self._courses_url:
-            try:
-                resp = self._get(self._courses_url)
-                if _looks_like_catalog(resp.text):
-                    return resp.text
-            except _NETWORK_ERRORS:
-                return None
-            except requests.RequestException:
-                pass
-        try:
-            html, url = self._follow_add_courses()
-            if html and _looks_like_catalog(html):
-                self._courses_url = url
-                return html
-        except _NETWORK_ERRORS:
+        if not self._session.cookies:
             return None
+        url = _stable_courses_url(self._courses_url) or (BASE_URL + COURSES_PATH)
+        try:
+            resp = self._get(url)
+            if _looks_like_catalog(resp.text):
+                self._courses_url = url
+                return resp.text
+            log.info("saved catalog url is stale, will re-login")
+            self._courses_url = None
+            return None
+        except _NETWORK_ERRORS as exc:
+            log.warning("saved catalog url dropped (%s)", type(exc).__name__)
+            self._courses_url = None
+            time.sleep(RETRY_PAUSE)
+        try:
+            html, next_url = self._follow_add_courses()
+            if html and _looks_like_catalog(html):
+                self._courses_url = _stable_courses_url(next_url)
+                return html
+        except _NETWORK_ERRORS as exc:
+            log.warning("addCourses dropped (%s)", type(exc).__name__)
         except requests.RequestException:
             pass
         return None
@@ -323,7 +347,7 @@ class EdugateClient:
             html, url = self._follow_add_courses()
             if not html:
                 return None, "Could not find courses page redirect"
-            self._courses_url = url
+            self._courses_url = _stable_courses_url(url)
             return html, None
         except requests.Timeout:
             return None, "Connection timeout"
@@ -361,7 +385,7 @@ class EdugateClient:
         cookies = data.get("cookies") or {}
         if isinstance(cookies, dict):
             self._session.cookies.update(cookies)
-        self._courses_url = data.get("courses_url")
+        self._courses_url = _stable_courses_url(data.get("courses_url"))
         log.info(
             "session loaded  cookies=%s  saved_url=%s",
             len(cookies) if isinstance(cookies, dict) else 0,
@@ -373,7 +397,7 @@ class EdugateClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "cookies": self._session.cookies.get_dict(),
-            "courses_url": self._courses_url,
+            "courses_url": _stable_courses_url(self._courses_url),
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
 
