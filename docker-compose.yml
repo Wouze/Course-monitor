@@ -2,8 +2,10 @@ services:
   bot:
     build: .
     restart: unless-stopped
-    # Edugate resets Docker-bridge traffic (curl 56). Host network uses your PC IP.
+    # Coolify often strips host mode and puts the bot on a bridge Edugate resets.
     network_mode: host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       USERS_FILE: /app/data/users.json
       SESSION_FILE: /app/data/session.json

@@ -1,0 +1,17 @@
+# Copy to ~/.config/systemd/user/edugate-proxy.service and edit the path.
+# Then: systemctl --user daemon-reload && systemctl --user enable --now edugate-proxy
+#
+# Keep this on the host if the bot stays in Coolify/Docker.
+
+[Unit]
+Description=Edugate host CONNECT proxy
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/YOU/Documents/GitHub/Course-monitor/edugate_proxy.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

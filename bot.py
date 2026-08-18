@@ -10,7 +10,7 @@ from pathlib import Path
 import telebot
 
 import config
-from edugate import EdugateClient, group_by_course
+from edugate import EdugateClient, filter_sections_for_course, group_by_course
 
 log = logging.getLogger("bot")
 
@@ -123,8 +123,9 @@ def _edugate_user_error(error):
         "SSLError",
     }:
         return (
-            "⚠️ تعذر الاتصال بإيدوجيت (الخادم أغلق الاتصال).\n"
-            "إذا كان البوت داخل Docker استخدم `network_mode: host`."
+            "⚠️ تعذر الاتصال بإيدوجيت من Docker.\n"
+            "شغّل البوت على الجهاز: `python bot.py`\n"
+            "أو شغّل على المضيف: `python edugate_proxy.py`"
         )
     return f"⚠️ *خطأ في الفحص:*\n`{md(error)}`"
 
@@ -157,6 +158,13 @@ def check_user_sections(chat_id, notify_errors=True, force=False):
         return False
 
     watches = user.get("watches") or {}
+    course_watches = user.get("course_watches") or []
+    if course_watches:
+        course_ok = _check_course_watches(chat_id, user, course_watches, force=force)
+        watch_ok = True
+        if watches:
+            watch_ok = _check_watches(chat_id, user, watches)
+        return course_ok and watch_ok
     if watches:
         return _check_watches(chat_id, user, watches)
 
@@ -216,6 +224,57 @@ def _send_section_group(chat_id, header, sections_list):
         send_long(chat_id, msg)
     except Exception as exc:
         log.error("telegram send fail  chat=%s error=%s", chat_id, type(exc).__name__)
+
+
+def _course_watch_key(query):
+    return re.sub(r"\s+", " ", str(query or "").strip()).lower()
+
+
+def _check_course_watches(chat_id, user, course_watches, force=False):
+    t0 = time.time()
+    log.info("check courses  chat=%s count=%s", chat_id, len(course_watches))
+    current, error = _catalog_snapshot(force=force)
+    if error:
+        if str(error).startswith("busy_backoff:"):
+            log.info("check skip  chat=%s reason=backoff wait=%ss", chat_id, error.split(":", 1)[1])
+        else:
+            log.error("check fail  chat=%s error=%s", chat_id, error)
+        return False
+
+    snapshots = user.get("course_snapshots") or {}
+    new_sections = []
+    removed_sections = []
+    next_snapshots = {}
+    for query in course_watches:
+        key = _course_watch_key(query)
+        matched = filter_sections_for_course(current, query)
+        next_snapshots[key] = matched
+        prev = snapshots.get(key) or {}
+        if not prev:
+            continue
+        new_sections.extend(sec for item, sec in matched.items() if item not in prev)
+        removed_sections.extend(sec for item, sec in prev.items() if item not in matched)
+
+    user["course_snapshots"] = next_snapshots
+    user["sections"] = current
+    user["total_checks"] = user.get("total_checks", 0) + 1
+    user["last_check"] = datetime.now().isoformat()
+    if new_sections:
+        user["total_new"] = user.get("total_new", 0) + len(new_sections)
+        _send_section_group(chat_id, "🆕 *شعب جديدة للمقرر الذي تراقبه!*\n\n", new_sections)
+    if removed_sections:
+        user["total_removed"] = user.get("total_removed", 0) + len(removed_sections)
+        _send_section_group(chat_id, "❌ *شعب اختفت من المقرر الذي تراقبه:*\n\n", removed_sections)
+
+    save_user(chat_id, user)
+    log.info(
+        "check courses done  chat=%s new=%s gone=%s ms=%s",
+        chat_id,
+        len(new_sections),
+        len(removed_sections),
+        int((time.time() - t0) * 1000),
+    )
+    return True
 
 
 def _check_watches(chat_id, user, watches):
@@ -327,11 +386,12 @@ def cmd_start(message):
     if user:
         interval_mins = user.get("check_interval", config.DEFAULT_CHECK_INTERVAL) // 60
         watches = user.get("watches") or {}
+        course_watches = user.get("course_watches") or []
         bot.reply_to(
             message,
             f"👋 مرحباً! أنت مسجل بالفعل.\n\n"
             f"📊 الشعب المحفوظة: {len(user.get('sections', {}))}\n"
-            f"👀 المراقبة: {len(watches)} شعبة\n"
+            f"👀 المراقبة: {len(watches)} شعبة · {len(course_watches)} مقرر\n"
             f"⏰ الفحص كل: {interval_mins} دقيقة\n\n"
             f"أرسل /help لعرض الأوامر",
             parse_mode="Markdown",
@@ -349,6 +409,8 @@ def cmd_start(message):
         {
             "sections": sections,
             "watches": {},
+            "course_watches": [],
+            "course_snapshots": {},
             "check_interval": config.DEFAULT_CHECK_INTERVAL,
             "registered_at": datetime.now().isoformat(),
             "total_checks": 0,
@@ -361,7 +423,8 @@ def cmd_start(message):
         f"✅ *تم التسجيل بنجاح!*\n\n"
         f"📊 تم العثور على {len(sections)} شعبة متاحة\n\n"
         f"راقب شعبة محددة:\n"
-        f"`/watch 12345`\n\n"
+        f"`/watch 12345`  شعبة واحدة\n"
+        f"`/course 339`  كل شعب المقرر\n\n"
         f"بدون قائمة مراقبة سأخبرك بأي تغيير في الكتالوج.\n"
         f"أرسل /help لعرض الأوامر",
         parse_mode="Markdown",
@@ -384,14 +447,18 @@ def cmd_help(message):
 /watch `[معرف]` - راقب شعبة
 /unwatch `[معرف]` - أوقف المراقبة
 /watches - قائمة المراقبة
+/course `[رمز]` - راقب كل شعب مقرر
+/uncourse `[رمز]` - أوقف مراقبة المقرر
+/courses - المقررات المُراقبة
 
 *الإعدادات:*
 /interval `[دقائق]` - تغيير وقت الفحص
    مثال: `/interval 30`
 
 *كيف يعمل:*
-• بدون `/watch` يُقارن كتالوج الشعب كلها
-• مع `/watch` يسأل إيدوجيت عن تلك المعرفات فقط
+• بدون مراقبة يُقارن كتالوج الشعب كلها
+• `/watch` يسأل إيدوجيت عن معرف شعبة
+• `/course 339` يخبرك بأي شعبة جديدة أو مغلقة لهذا المقرر
 """
     if is_admin(message.chat.id):
         help_text += """
@@ -428,6 +495,7 @@ def cmd_sections(message):
     user = _require_user(message)
     if not user:
         return
+    query = " ".join(message.text.split()[1:]).strip()
     bot.reply_to(message, "📥 جاري جلب الشعب...")
     sections, error = _catalog_snapshot()
     if error:
@@ -435,8 +503,19 @@ def cmd_sections(message):
         return
     user["sections"] = sections
     save_user(message.chat.id, user)
+    if query:
+        sections = filter_sections_for_course(sections, query)
+        if not sections:
+            bot.send_message(
+                message.chat.id,
+                f"لا توجد شعب ظاهرة الآن للمقرر `{md(query)}`.\n"
+                f"للمراقبة لاحقاً: `/course {md(query)}`",
+                parse_mode="Markdown",
+            )
+            return
     courses = group_by_course(list(sections.values()))
-    msg = f"📊 *الشعب المتاحة ({len(sections)} شعبة):*\n\n"
+    title = f"المقرر {query}" if query else "الشعب المتاحة"
+    msg = f"📊 *{md(title)} ({len(sections)} شعبة):*\n\n"
     for code, info in sorted(courses.items()):
         msg += f"📚 *{md(code)}* - {md(info['name'])}\n"
         for sec in info["sections"]:
@@ -548,6 +627,112 @@ def cmd_watches(message):
     send_long(message.chat.id, msg)
 
 
+def _existing_course_watch(course_watches, query):
+    want = _course_watch_key(query)
+    for item in course_watches:
+        if _course_watch_key(item) == want:
+            return item
+    return None
+
+
+@bot.message_handler(commands=["course"])
+def cmd_course(message):
+    user = _require_user(message)
+    if not user:
+        return
+    queries = [p for p in message.text.split()[1:] if p]
+    if not queries:
+        bot.reply_to(
+            message,
+            "⚠️ أرسل رمز المقرر\nمثال: `/course 339`\nأو اعرض الشعب: `/sections 339`",
+            parse_mode="Markdown",
+        )
+        return
+    bot.reply_to(message, "📥 جاري البحث عن شعب المقرر...")
+    sections, error = _catalog_snapshot(force=True)
+    if error:
+        bot.send_message(message.chat.id, _edugate_user_error(error), parse_mode="Markdown")
+        return
+
+    course_watches = list(user.get("course_watches") or [])
+    snapshots = dict(user.get("course_snapshots") or {})
+    added = []
+    for raw in queries:
+        if _existing_course_watch(course_watches, raw):
+            continue
+        if len(course_watches) >= config.MAX_WATCHES:
+            bot.reply_to(message, f"⚠️ الحد الأقصى {config.MAX_WATCHES} مقرر")
+            return
+        matched = filter_sections_for_course(sections, raw)
+        course_watches.append(raw.strip())
+        snapshots[_course_watch_key(raw)] = matched
+        added.append((raw.strip(), matched))
+
+    user["course_watches"] = course_watches
+    user["course_snapshots"] = snapshots
+    user["sections"] = sections
+    save_user(message.chat.id, user)
+    if not added:
+        bot.reply_to(message, "هذا المقرر مُراقب مسبقاً.")
+        return
+
+    msg = f"✅ تتم مراقبة {len(added)} مقرر.\nسأخبرك إذا ظهرت شعبة أخرى أو اختفت.\n\n"
+    for query, matched in added:
+        msg += f"📚 `{md(query)}` — {len(matched)} شعبة الآن\n"
+        for sec in list(matched.values())[:8]:
+            msg += _section_line(sec)
+        if len(matched) > 8:
+            msg += f"   • … و {len(matched) - 8} أخرى\n"
+        msg += "\n"
+    send_long(message.chat.id, msg)
+
+
+@bot.message_handler(commands=["uncourse"])
+def cmd_uncourse(message):
+    user = _require_user(message)
+    if not user:
+        return
+    queries = [p for p in message.text.split()[1:] if p]
+    course_watches = list(user.get("course_watches") or [])
+    snapshots = dict(user.get("course_snapshots") or {})
+    if not queries:
+        bot.reply_to(message, "⚠️ أرسل رمز المقرر\nمثال: `/uncourse 339`", parse_mode="Markdown")
+        return
+    removed = 0
+    for raw in queries:
+        existing = _existing_course_watch(course_watches, raw)
+        if not existing:
+            continue
+        course_watches = [item for item in course_watches if _course_watch_key(item) != _course_watch_key(raw)]
+        snapshots.pop(_course_watch_key(raw), None)
+        removed += 1
+    user["course_watches"] = course_watches
+    user["course_snapshots"] = snapshots
+    save_user(message.chat.id, user)
+    bot.reply_to(message, f"✅ تم حذف {removed}. المتبقي: {len(course_watches)}")
+
+
+@bot.message_handler(commands=["courses"])
+def cmd_courses(message):
+    user = _require_user(message)
+    if not user:
+        return
+    course_watches = user.get("course_watches") or []
+    snapshots = user.get("course_snapshots") or {}
+    if not course_watches:
+        bot.reply_to(
+            message,
+            "لا توجد مقررات مُراقبة. أضف بـ `/course 339`",
+            parse_mode="Markdown",
+        )
+        return
+    msg = f"📚 *المقررات المُراقبة ({len(course_watches)}):*\n\n"
+    for query in course_watches:
+        matched = snapshots.get(_course_watch_key(query)) or {}
+        msg += f"• `{md(query)}` — {len(matched)} شعبة في آخر فحص\n"
+    send_long(message.chat.id, msg)
+
+
 @bot.message_handler(commands=["stats"])
 def cmd_stats(message):
     user = _require_user(message)
@@ -561,10 +746,11 @@ def cmd_stats(message):
         except Exception:
             pass
     watches = user.get("watches") or {}
+    course_watches = user.get("course_watches") or []
     msg = f"""📈 *إحصائياتك:*
 
 📊 الشعب في آخر لقطة: {len(user.get('sections', {}))}
-👀 المراقبة: {len(watches)}
+👀 المراقبة: {len(watches)} شعبة · {len(course_watches)} مقرر
 
 ⏰ الفحص كل: {interval_mins} دقيقة
 🕐 آخر فحص: {last_check}
@@ -583,13 +769,16 @@ def cmd_settings(message):
         return
     interval_mins = user.get("check_interval", config.DEFAULT_CHECK_INTERVAL) // 60
     watches = user.get("watches") or {}
+    course_watches = user.get("course_watches") or []
     msg = f"""⚙️ *إعداداتك:*
 
 ⏰ وقت الفحص: كل {interval_mins} دقيقة
-👀 المراقبة: {len(watches)} / {config.MAX_WATCHES}
+👀 الشعب: {len(watches)} / {config.MAX_WATCHES}
+📚 المقررات: {len(course_watches)} / {config.MAX_WATCHES}
 
 `/interval [دقائق]`
 `/watch [معرف]`
+`/course [رمز]`
 """
     bot.send_message(message.chat.id, msg, parse_mode="Markdown")
 

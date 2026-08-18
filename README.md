@@ -34,31 +34,29 @@ Then start the bot:
 python bot.py
 ```
 
-## Coolify
+## Coolify / Docker
 
-This is a long-running worker (Telegram polling), not an HTTP app. Do not assign a public domain or port.
+Edugate **resets Docker-bridge connections** (`curl: (56) Connection reset by peer`), even on a home PC. This machine can open the login page from the host; the Coolify container cannot. Coolify also usually ignores `network_mode: host`.
 
-1. New resource → **Docker Compose** (recommended) or **Dockerfile**.
-2. Point it at this repo.
-3. Set these environment variables in Coolify (same names as `.env`):
-   - `BOT_TOKEN`
-   - `ADMIN_ID`
-   - `EDUGATE_USERNAME`
-   - `EDUGATE_PASSWORD`
-   - `CHECK_INTERVAL` (minutes, default 60)
-   - `MIN_CHECK_INTERVAL` (minutes, default 15)
-   - `CHECK_JITTER` (seconds, default 5)
-   - `MAX_WATCHES` (default 15)
-   - `EDUGATE_PROXY` (optional HTTP/SOCKS proxy)
-4. Deploy. Compose already mounts a volume at `/app/data` so `users.json` survives restarts.
-
-This compose uses **host networking**. Edugate resets connections from Docker's default bridge (`curl: (56) Connection reset by peer`), even on a home PC. If you deploy as a **Dockerfile** resource instead, set the container network to **host** in Coolify and mount persistent storage at `/app/data`.
-
-Local Docker:
+**Recommended:** run the bot on the host, not in Coolify.
 
 ```bash
-docker compose up --build
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python bot.py
 ```
+
+Or copy `scripts/course-monitor.service` to systemd and enable it.
+
+If you keep the bot in Coolify, start a host-side tunnel (stdlib only):
+
+```bash
+python3 edugate_proxy.py
+```
+
+The bot then tries `http://172.17.0.1:18080`. Use `scripts/edugate-proxy.service` to keep that running.
+
+This is a worker (Telegram polling), not an HTTP app. Do not assign a public domain or port. Persist `/app/data` if you still deploy the image.
 
 ## User Commands
 
@@ -73,6 +71,10 @@ docker compose up --build
 | `/watch [id]` | Watch a section ID (official lookup) |
 | `/unwatch [id]` | Stop watching |
 | `/watches` | List watched sections |
+| `/course [code]` | Watch every section of a course (e.g. `339`) |
+| `/uncourse [code]` | Stop watching a course |
+| `/courses` | List watched courses |
+| `/sections [code]` | List catalog sections, optionally for one course |
 | `/help` | Show all commands |
 | `/logout` | Remove your account |
 

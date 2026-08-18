@@ -1,6 +1,7 @@
 """Edugate client: cookie session, catalog parse, official section lookup."""
 import json
 import logging
+import os
 import random
 import re
 import socket
@@ -92,14 +93,35 @@ def _cookie_dict(session):
     return {cookie.name: cookie.value for cookie in cookies}
 
 
-def _make_curl_session(http1=True, ipv4=True, cookies=None):
+def _in_docker():
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
+def _host_proxy_urls():
+    port = os.getenv("EDUGATE_HOST_PROXY_PORT", "18080").strip() or "18080"
+    urls = [
+        f"http://172.17.0.1:{port}",
+        f"http://host.docker.internal:{port}",
+        f"http://10.88.0.1:{port}",
+    ]
+    seen = set()
+    out = []
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def _make_curl_session(http1=True, ipv4=True, cookies=None, proxy=None):
     kwargs = {"impersonate": IMPERSONATE, "timeout": REQUEST_TIMEOUT}
     if http1:
         kwargs["http_version"] = CurlHttpVersion.V1_1
     if ipv4:
         kwargs["curl_options"] = {CurlOpt.IPRESOLVE: CURL_IPRESOLVE_V4}
-    if config.EDUGATE_PROXY:
-        kwargs["proxy"] = config.EDUGATE_PROXY
+    proxy = proxy or config.EDUGATE_PROXY
+    if proxy:
+        kwargs["proxy"] = proxy
     session = http.Session(**kwargs)
     session.headers["Accept-Language"] = "ar,en-US;q=0.9,en;q=0.8"
     if cookies:
@@ -107,17 +129,16 @@ def _make_curl_session(http1=True, ipv4=True, cookies=None):
     return session
 
 
-def _make_requests_session(ipv4=True, cookies=None):
+def _make_requests_session(ipv4=True, cookies=None, proxy=None):
     if ipv4:
         _urllib3_conn.allowed_gai_family = lambda: socket.AF_INET
     session = std_requests.Session()
     session.mount("https://", HTTPAdapter())
     session.mount("http://", HTTPAdapter())
     session.headers.update(_REQUESTS_HEADERS)
-    if config.EDUGATE_PROXY:
-        session.proxies.update(
-            {"http": config.EDUGATE_PROXY, "https": config.EDUGATE_PROXY}
-        )
+    proxy = proxy or config.EDUGATE_PROXY
+    if proxy:
+        session.proxies.update({"http": proxy, "https": proxy})
     if cookies:
         session.cookies.update(cookies)
     return session
@@ -153,11 +174,54 @@ class EdugateClient:
         self._backoff_seconds = BUSY_BACKOFF_START
         self._busy_alerted = False
         self._catalog_cache = (0.0, None)
-        log.info("http  proxy=%s", "yes" if config.EDUGATE_PROXY else "no")
+        self._reachable = False
+        log.info(
+            "http  docker=%s  proxy=%s",
+            "yes" if _in_docker() else "no",
+            "yes" if config.EDUGATE_PROXY else "no",
+        )
         self._pick_transport()
         self._load_session()
 
+    def _adopt_session(self, factory, session):
+        try:
+            self._session.close()
+        except Exception:
+            pass
+        self._session_factory = factory
+        self._session = session
+        self._reachable = True
+
+    def _try_factory(self, name, factory):
+        session = factory({})
+        try:
+            resp = session.get(LOGIN_URL, timeout=15)
+            size = len(resp.content or b"")
+            if resp.status_code == 200 and size > 500:
+                self._adopt_session(factory, session)
+                log.info(
+                    "probe ok  transport=%s status=%s bytes=%s",
+                    name,
+                    resp.status_code,
+                    size,
+                )
+                return True
+            log.warning(
+                "probe skip  transport=%s status=%s bytes=%s",
+                name,
+                resp.status_code,
+                size,
+            )
+        except Exception as exc:
+            log.warning("probe fail  transport=%s %s", name, _exc_detail(exc))
+        try:
+            session.close()
+        except Exception:
+            pass
+        return False
+
     def _pick_transport(self):
+        self._reachable = False
         strategies = [
             (
                 "curl chrome http1 ipv4",
@@ -174,39 +238,35 @@ class EdugateClient:
             ("requests ipv4", lambda cookies: _make_requests_session(ipv4=True, cookies=cookies)),
         ]
         for name, factory in strategies:
-            session = factory({})
-            try:
-                resp = session.get(LOGIN_URL, timeout=15)
-                size = len(resp.content or b"")
-                if resp.status_code == 200 and size > 500:
-                    try:
-                        self._session.close()
-                    except Exception:
-                        pass
-                    self._session_factory = factory
-                    self._session = session
-                    log.info(
-                        "probe ok  transport=%s status=%s bytes=%s",
-                        name,
-                        resp.status_code,
-                        size,
-                    )
+            if self._try_factory(name, factory):
+                return
+            time.sleep(0.4)
+
+        if not config.EDUGATE_PROXY:
+            for proxy in _host_proxy_urls():
+                name = f"curl chrome http1 ipv4 via {urlparse(proxy).hostname}"
+                factory = lambda cookies, proxy=proxy: _make_curl_session(
+                    http1=True, ipv4=True, cookies=cookies, proxy=proxy
+                )
+                if self._try_factory(name, factory):
                     return
-                log.warning("probe skip  transport=%s status=%s bytes=%s", name, resp.status_code, size)
-            except Exception as exc:
-                log.warning("probe fail  transport=%s %s", name, _exc_detail(exc))
-            try:
-                session.close()
-            except Exception:
-                pass
+                time.sleep(0.4)
+
         _log_dns()
-        log.warning("probe none worked, using curl chrome http1 ipv4")
+        if _in_docker():
+            log.warning(
+                "probe none worked inside Docker — Edugate resets container traffic. "
+                "Run python bot.py on the host, or start python edugate_proxy.py on the host"
+            )
+        else:
+            log.warning("probe none worked, using curl chrome http1 ipv4")
         self._session_factory = strategies[0][1]
         try:
             self._session.close()
         except Exception:
             pass
         self._session = self._session_factory({})
+        self._reachable = False
 
     def _rebuild_session(self, keep_cookies=True):
         cookies = _cookie_dict(self._session) if keep_cookies else {}
@@ -267,6 +327,16 @@ class EdugateClient:
                     log.info("catalog ok  source=cache sections=%s", len(cached))
                     return cached, None
 
+            if not self._reachable:
+                self._pick_transport()
+            if not self._reachable:
+                self._trip_backoff()
+                log.warning(
+                    "catalog fail  error=ConnectionError backoff=%ss",
+                    self.backoff_remaining(),
+                )
+                return None, "ConnectionError"
+
             had_cookies = bool(self._session.cookies)
             html = self._catalog_html_reused()
             source = "session" if html else "login"
@@ -310,6 +380,10 @@ class EdugateClient:
         """Official add-box lookup. Returns a status dict. Never submits add."""
         section_id = str(section_id).strip()
         with self._lock:
+            if not self._reachable:
+                self._pick_transport()
+            if not self._reachable:
+                return {"section_id": section_id, "status": "error", "error": "ConnectionError"}
             wait = self.backoff_remaining()
             if wait:
                 return {"section_id": section_id, "status": "busy", "backoff": wait}
@@ -696,3 +770,26 @@ def group_by_course(sections_list):
             courses[code] = {"name": sec.get("course_name") or "", "sections": []}
         courses[code]["sections"].append(sec)
     return courses
+
+
+def _norm_course_query(query):
+    return re.sub(r"\s+", " ", str(query or "").strip()).lower()
+
+
+def section_matches_course(sec, query):
+    """True if a catalog row belongs to course 339 / '123 339' / course id."""
+    q = _norm_course_query(query)
+    if not q:
+        return False
+    code = _norm_course_query(sec.get("course_code") or "")
+    course_id = _norm_course_query(sec.get("course_id") or "")
+    compact_q = re.sub(r"\s+", "", q)
+    compact_code = re.sub(r"\s+", "", code)
+    if q in {code, course_id} or compact_q in {compact_code, course_id}:
+        return True
+    tokens = re.findall(r"[a-z0-9]+", code)
+    return q in tokens or compact_q in tokens
+
+
+def filter_sections_for_course(sections, query):
+    return {key: sec for key, sec in (sections or {}).items() if section_matches_course(sec, query)}

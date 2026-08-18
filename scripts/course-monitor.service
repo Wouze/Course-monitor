@@ -1,0 +1,19 @@
+# Copy to ~/.config/systemd/user/course-monitor.service and edit the paths.
+# Then: systemctl --user daemon-reload && systemctl --user enable --now course-monitor
+#
+# This runs the bot on the host. Coolify/Docker cannot reach Edugate.
+
+[Unit]
+Description=KSU Course monitor Telegram bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/YOU/Documents/GitHub/Course-monitor
+EnvironmentFile=/home/YOU/Documents/GitHub/Course-monitor/.env
+ExecStart=/home/YOU/Documents/GitHub/Course-monitor/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
