@@ -22,6 +22,10 @@ EDUGATE_PASSWORD = _require("EDUGATE_PASSWORD")
 USERS_FILE = os.getenv(
     "USERS_FILE", str(Path(__file__).resolve().parent / "users.json")
 )
+SESSION_FILE = os.getenv(
+    "SESSION_FILE", str(Path(USERS_FILE).resolve().parent / "session.json")
+)
+MAX_WATCHES = max(1, int(os.getenv("MAX_WATCHES", "15")))
 
 # Intervals in .env are minutes; jitter is seconds. bot.py stores seconds.
 DEFAULT_CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60")) * 60

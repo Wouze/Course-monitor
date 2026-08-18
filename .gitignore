@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 users.json
+session.json
 data/
 __pycache__/
 *.pyc

@@ -3,6 +3,7 @@
 .env
 .env.*
 users.json
+session.json
 data
 __pycache__
 *.pyc

@@ -21,6 +21,7 @@ EDUGATE_PASSWORD=your_edugate_password
 CHECK_INTERVAL=60
 MIN_CHECK_INTERVAL=15
 CHECK_JITTER=5
+MAX_WATCHES=15
 ```
 
 Edugate credentials stay in `.env` only. The bot never asks for them in Telegram.
@@ -46,6 +47,7 @@ This is a long-running worker (Telegram polling), not an HTTP app. Do not assign
    - `CHECK_INTERVAL` (minutes, default 60)
    - `MIN_CHECK_INTERVAL` (minutes, default 15)
    - `CHECK_JITTER` (seconds, default 5)
+   - `MAX_WATCHES` (default 15)
 4. Deploy. Compose already mounts a volume at `/app/data` so `users.json` survives restarts.
 
 If you use the Dockerfile resource instead of Compose, add a persistent storage mount to `/app/data`. The image defaults `USERS_FILE` to `/app/data/users.json`.
@@ -66,6 +68,9 @@ docker compose up --build
 | `/stats` | Your statistics |
 | `/settings` | Your settings |
 | `/interval [min]` | Set check interval (min 15) |
+| `/watch [id]` | Watch a section ID (official lookup) |
+| `/unwatch [id]` | Stop watching |
+| `/watches` | List watched sections |
 | `/help` | Show all commands |
 | `/logout` | Remove your account |
 
@@ -79,8 +84,9 @@ docker compose up --build
 
 ## Files
 
-- `bot.py` - Main bot
+- `bot.py` - Telegram commands
+- `edugate.py` - Session reuse, catalog parse, section lookup
 - `config.py` - Loads settings from `.env`
 - `.env` - Bot token, admin ID, and Edugate login (not committed)
-- `users.json` - Chat snapshots & stats only (auto-created, not committed)
+- `users.json` / `session.json` - Chat snapshots and Edugate cookies (not committed)
 - `Dockerfile` / `docker-compose.yml` - Coolify / local Docker

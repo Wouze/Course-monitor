@@ -4,6 +4,7 @@ services:
     restart: unless-stopped
     environment:
       USERS_FILE: /app/data/users.json
+      SESSION_FILE: /app/data/session.json
       CHECK_INTERVAL: ${CHECK_INTERVAL:-60}
       MIN_CHECK_INTERVAL: ${MIN_CHECK_INTERVAL:-15}
       CHECK_JITTER: ${CHECK_JITTER:-5}
