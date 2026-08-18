@@ -22,6 +22,7 @@ CHECK_INTERVAL=60
 MIN_CHECK_INTERVAL=15
 CHECK_JITTER=5
 MAX_WATCHES=15
+EDUGATE_PROXY=
 ```
 
 Edugate credentials stay in `.env` only. The bot never asks for them in Telegram.
@@ -48,6 +49,7 @@ This is a long-running worker (Telegram polling), not an HTTP app. Do not assign
    - `MIN_CHECK_INTERVAL` (minutes, default 15)
    - `CHECK_JITTER` (seconds, default 5)
    - `MAX_WATCHES` (default 15)
+   - `EDUGATE_PROXY` (optional; HTTP/SOCKS proxy if Edugate blocks the VPS IP)
 4. Deploy. Compose already mounts a volume at `/app/data` so `users.json` survives restarts.
 
 If you use the Dockerfile resource instead of Compose, add a persistent storage mount to `/app/data`. The image defaults `USERS_FILE` to `/app/data/users.json`.

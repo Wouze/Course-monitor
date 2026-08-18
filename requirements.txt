@@ -1,4 +1,5 @@
 requests
+curl_cffi>=0.13
 beautifulsoup4
 pyTelegramBotAPI
 python-dotenv

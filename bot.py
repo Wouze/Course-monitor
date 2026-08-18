@@ -111,6 +111,25 @@ def _section_line(sec):
     )
 
 
+def _edugate_user_error(error):
+    err = str(error)
+    if err in {
+        "ConnectionError",
+        "Connection timeout",
+        "Timeout",
+        "ChunkedEncodingError",
+        "ProxyError",
+        "DNSError",
+        "SSLError",
+    }:
+        return (
+            "⚠️ تعذر الاتصال بإيدوجيت من هذا الخادم.\n"
+            "إذا كان البوت على VPS فالجامعة قد تحجب ذلك العنوان.\n"
+            "شغّله من شبكة المنزل أو عيّن `EDUGATE_PROXY`."
+        )
+    return f"⚠️ *خطأ في الفحص:*\n`{md(error)}`"
+
+
 def _notify_busy_once():
     wait = edugate.backoff_remaining()
     if not wait or not edugate.consume_busy_alert():
@@ -152,9 +171,7 @@ def check_user_sections(chat_id, notify_errors=True, force=False):
             log.error("check fail  chat=%s error=%s", chat_id, error)
         if notify_errors and not str(error).startswith("busy_backoff:"):
             try:
-                bot.send_message(
-                    chat_id, f"⚠️ *خطأ في الفحص:*\n`{md(error)}`", parse_mode="Markdown"
-                )
+                bot.send_message(chat_id, _edugate_user_error(error), parse_mode="Markdown")
             except Exception:
                 pass
         return False
@@ -325,12 +342,7 @@ def cmd_start(message):
     bot.reply_to(message, "🔄 جاري التحقق من حساب إيدوجيت...")
     sections, error = _catalog_snapshot()
     if error:
-        bot.send_message(
-            chat_id,
-            f"❌ *فشل تسجيل الدخول:*\n`{md(error)}`\n\n"
-            f"تحقق من بيانات إيدوجيت في ملف `.env`.",
-            parse_mode="Markdown",
-        )
+        bot.send_message(chat_id, _edugate_user_error(error), parse_mode="Markdown")
         return
 
     save_user(
@@ -420,7 +432,7 @@ def cmd_sections(message):
     bot.reply_to(message, "📥 جاري جلب الشعب...")
     sections, error = _catalog_snapshot()
     if error:
-        bot.send_message(message.chat.id, f"❌ *خطأ:* {md(error)}", parse_mode="Markdown")
+        bot.send_message(message.chat.id, _edugate_user_error(error), parse_mode="Markdown")
         return
     user["sections"] = sections
     save_user(message.chat.id, user)

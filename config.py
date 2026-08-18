@@ -19,6 +19,7 @@ BOT_TOKEN = _require("BOT_TOKEN")
 ADMIN_ID = int(_require("ADMIN_ID"))
 EDUGATE_USERNAME = _require("EDUGATE_USERNAME")
 EDUGATE_PASSWORD = _require("EDUGATE_PASSWORD")
+EDUGATE_PROXY = os.getenv("EDUGATE_PROXY", "").strip()
 USERS_FILE = os.getenv(
     "USERS_FILE", str(Path(__file__).resolve().parent / "users.json")
 )
