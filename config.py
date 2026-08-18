@@ -19,7 +19,17 @@ BOT_TOKEN = _require("BOT_TOKEN")
 ADMIN_ID = int(_require("ADMIN_ID"))
 EDUGATE_USERNAME = _require("EDUGATE_USERNAME")
 EDUGATE_PASSWORD = _require("EDUGATE_PASSWORD")
+USERS_FILE = os.getenv(
+    "USERS_FILE", str(Path(__file__).resolve().parent / "users.json")
+)
 
-# Default check interval (in seconds) - users can customize (min 15 min)
-DEFAULT_CHECK_INTERVAL = 60 * 60  # 1 hour
-MIN_CHECK_INTERVAL = 15 * 60  # 15 minutes minimum
+# Intervals in .env are minutes; jitter is seconds. bot.py stores seconds.
+DEFAULT_CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60")) * 60
+MIN_CHECK_INTERVAL = int(os.getenv("MIN_CHECK_INTERVAL", "15")) * 60
+CHECK_JITTER = max(0, int(os.getenv("CHECK_JITTER", "5")))
+
+if DEFAULT_CHECK_INTERVAL < MIN_CHECK_INTERVAL:
+    raise RuntimeError(
+        f"CHECK_INTERVAL must be at least MIN_CHECK_INTERVAL "
+        f"({MIN_CHECK_INTERVAL // 60} minutes)."
+    )

@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      USERS_FILE: /app/data/users.json
+      CHECK_INTERVAL: ${CHECK_INTERVAL:-60}
+      MIN_CHECK_INTERVAL: ${MIN_CHECK_INTERVAL:-15}
+      CHECK_JITTER: ${CHECK_JITTER:-5}
+    volumes:
+      - bot-data:/app/data
+
+volumes:
+  bot-data:

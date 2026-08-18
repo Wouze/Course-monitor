@@ -12,7 +12,7 @@ import config
 
 # --- Bot Setup ---
 bot = telebot.TeleBot(config.BOT_TOKEN)
-USERS_FILE = "users.json"
+USERS_FILE = config.USERS_FILE
 
 # --- URLs ---
 LOGIN_URL = "https://edugate.ksu.edu.sa/ksu/ui/home.faces"
@@ -279,31 +279,42 @@ def check_user_sections(chat_id):
     save_user(chat_id, user)
 
 
+def _next_interval(base_interval):
+    """Interval in seconds, plus a one-shot ±CHECK_JITTER (never below 1s)."""
+    jitter = config.CHECK_JITTER
+    offset = random.randint(-jitter, jitter) if jitter else 0
+    return max(1, base_interval + offset)
+
+
 def scheduler():
     """Run section check for all users based on their intervals."""
-    user_last_check = {}  # {chat_id: timestamp}
-    
+    next_check_at = {}  # {chat_id: unix timestamp}
+
     while True:
         users = load_users()
         now = time.time()
-        
+        soonest = None
+
         for chat_id_str, user_data in users.items():
             chat_id = int(chat_id_str)
             base_interval = user_data.get('check_interval', config.DEFAULT_CHECK_INTERVAL)
-            # Add random delay of ±60 seconds
-            random_offset = random.randint(-60, 60)
-            interval = base_interval + random_offset
-            last = user_last_check.get(chat_id, 0)
-            
-            if now - last >= interval:
+            due = next_check_at.get(chat_id, 0)
+
+            if now >= due:
                 try:
                     check_user_sections(chat_id)
-                    user_last_check[chat_id] = now
                 except Exception as e:
                     print(f"❌ Error checking user {chat_id}: {e}")
-                time.sleep(2)  # Small delay between users
-        
-        time.sleep(60)  # Check every minute if any user needs checking
+                next_check_at[chat_id] = time.time() + _next_interval(base_interval)
+                time.sleep(2)
+
+            remaining = next_check_at.get(chat_id, now) - time.time()
+            if soonest is None or remaining < soonest:
+                soonest = remaining
+
+        # Wake often enough that ±5s jitter is real (old loop slept 60s)
+        sleep_for = 5 if soonest is None else max(1, min(soonest, 5))
+        time.sleep(sleep_for)
 
 
 # --- Bot Commands ---
@@ -603,6 +614,9 @@ def cmd_broadcast(message):
 
 # --- Main ---
 if __name__ == "__main__":
+    from pathlib import Path
+    Path(USERS_FILE).parent.mkdir(parents=True, exist_ok=True)
+
     print("🤖 Section Monitor Bot starting...")
     users = load_users()
     if users:
